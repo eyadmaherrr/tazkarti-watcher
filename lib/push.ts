@@ -85,7 +85,9 @@ async function sendExpo(payload: PushPayload) {
             title: payload.title,
             body: payload.body,
             data: payload.data,
-            sound: "default",
+            // alarm.wav ships with the Tazkarti Watch app (expo-notifications "sounds"); falls back to default.
+            sound: "alarm.wav",
+            interruptionLevel: "time-sensitive",
             priority: "high",
             channelId: "new-matches",
           })),
