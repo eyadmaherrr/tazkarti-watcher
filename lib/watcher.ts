@@ -27,6 +27,7 @@ type Watcher = {
   state: State;
   emitter: EventEmitter;
   startedAt: string;
+  looping: boolean;
   timer: NodeJS.Timeout | null;
   nextCheckAt: number | null;
   inFlight: Promise<void> | null;
@@ -56,6 +57,7 @@ function watcher(): Watcher {
       }),
       emitter,
       startedAt: new Date().toISOString(),
+      looping: false,
       timer: null,
       nextCheckAt: null,
       inFlight: null,
@@ -126,6 +128,13 @@ async function runCheck(w: Watcher) {
     s.lastError = (e as Error).message;
     console.error("[watcher] check failed:", s.lastError);
   } finally {
+    // Schedule the next check *before* announcing this one, so listeners get a future nextCheckAt.
+    // Any check (loop, manual, ?fresh=1) restarts the countdown.
+    if (w.looping) {
+      if (w.timer) clearTimeout(w.timer);
+      w.nextCheckAt = Date.now() + INTERVAL_SECONDS * 1000;
+      w.timer = setTimeout(() => void checkNow(), INTERVAL_SECONDS * 1000);
+    }
     writeJson(STATE_FILE, s);
     w.emitter.emit("checked", getStatus());
   }
@@ -141,15 +150,11 @@ export function checkNow(): Promise<void> {
 /** Start the polling loop once per server process. Safe to call from anywhere. */
 export function startWatcher() {
   const w = watcher();
-  if (w.timer || w.nextCheckAt) return w;
-  const loop = async () => {
-    await checkNow();
-    w.nextCheckAt = Date.now() + INTERVAL_SECONDS * 1000;
-    w.timer = setTimeout(loop, INTERVAL_SECONDS * 1000);
-  };
+  if (w.looping) return w;
+  w.looping = true;
   w.nextCheckAt = Date.now();
   console.log(`[watcher] started — checking ${SOURCE} every ${INTERVAL_SECONDS}s`);
-  loop();
+  void checkNow();
   return w;
 }
 
@@ -165,7 +170,7 @@ export function onWatcher(event: string, fn: (payload: never) => void) {
 export function getStatus(): WatcherStatus {
   const w = watcher();
   return {
-    running: Boolean(w.timer || w.nextCheckAt),
+    running: w.looping,
     intervalSeconds: INTERVAL_SECONDS,
     startedAt: w.startedAt,
     lastChecked: w.state.lastChecked,

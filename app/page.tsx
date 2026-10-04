@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Match, MatchesResponse, WatchEvent, WatcherStatus } from "@/lib/types";
 import { armAudio, isAudioArmed, startAlarm, stopAlarm } from "./alarm";
 
@@ -101,6 +101,7 @@ export default function Home() {
   const [streamUp, setStreamUp] = useState(false);
   const [events, setEvents] = useState<WatchEvent[]>([]);
   const [countdown, setCountdown] = useState(0);
+  const kickedAt = useRef(0);
   const [armed, setArmed] = useState(false);
   const [alarm, setAlarm] = useState<{ title: string; lines: string[] } | null>(null);
 
@@ -193,14 +194,26 @@ export default function Home() {
     };
   }, [sync]);
 
-  // Countdown to the server's next check
+  // Countdown to the server's next check. On serverless hosts (Vercel) the server is frozen between
+  // requests, so its own timer may never fire — if it's overdue, this page triggers the check instead.
   useEffect(() => {
+    if (!status) return;
+    const period = status.intervalSeconds * 1000;
     const t = setInterval(() => {
-      const next = status?.nextCheckAt ? Date.parse(status.nextCheckAt) : 0;
-      setCountdown(Math.max(0, Math.ceil((next - Date.now()) / 1000)));
+      const next = Math.max(status.nextCheckAt ? Date.parse(status.nextCheckAt) : 0, kickedAt.current + period);
+      const left = next - Date.now();
+      setCountdown(Math.max(0, Math.ceil(left / 1000)));
+      if (left < -5000 && Date.now() - kickedAt.current > period) {
+        kickedAt.current = Date.now();
+        sync(true)
+          .then(() => fetch("/api/status", { cache: "no-store" }))
+          .then((r) => r.json())
+          .then((s: WatcherStatus) => setStatus(s))
+          .catch(() => {});
+      }
     }, 500);
     return () => clearInterval(t);
-  }, [status]);
+  }, [status, sync]);
 
   // Audio can only start after a user gesture, so arm it on the first click/key anywhere on the page.
   useEffect(() => {
