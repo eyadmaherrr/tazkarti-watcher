@@ -121,7 +121,13 @@ export default function Home() {
       if (fresh) setChecking(true);
       try {
         const res = await fetch(`/api/matches${fresh ? "?fresh=1" : ""}`, { cache: "no-store" });
-        const data = (await res.json()) as MatchesResponse;
+        const text = await res.text();
+        let data: MatchesResponse;
+        try {
+          data = JSON.parse(text) as MatchesResponse;
+        } catch {
+          throw new Error(`Server returned HTTP ${res.status}${text ? "" : " with an empty body"}`);
+        }
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         setError(data.error ?? null);
 
