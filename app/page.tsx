@@ -1,35 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { Match, MatchesResponse, WatchEvent, WatcherStatus } from "@/lib/types";
 import { armAudio, isAudioArmed, startAlarm, stopAlarm } from "./alarm";
 
-type Match = {
-  matchId: number;
-  matchStatus: number;
-  teamName1: string;
-  teamName2: string;
-  teamNameAr1?: string;
-  teamNameAr2?: string;
-  team1Logo?: string | null;
-  team2Logo?: string | null;
-  matchNumber?: string | null;
-  stadiumName: string;
-  stadiumCityEn?: string;
-  kickOffTime: string;
-  gatesOpenTime?: string;
-  maxTicketsPerUser?: number;
-  roundName?: string | null;
-  teamGroupName?: string | null;
-  tournament?: { nameEn?: string; nameAr?: string };
-};
-
-type ApiResponse = { matches: Match[]; hash: string; lastModified: string | null; fetchedAt: string; error?: string };
-type LogEntry = { at: string; text: string; kind: "new" | "update" | "info" | "error" };
-
 const KNOWN_IDS = "tw.knownIds";
-const LAST_HASH = "tw.hash";
-const INTERVAL = "tw.interval";
-const INTERVALS = [15, 30, 60, 120, 300];
 
 const store = {
   get<T>(key: string, fallback: T): T {
@@ -50,7 +25,9 @@ const store = {
 const fmtDay = (s: string) =>
   new Date(s).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 const fmtTime = (s: string) => new Date(s).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-const fmtClock = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const fmtClock = (s: string) =>
+  new Date(s).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const fmtStamp = (s: string) => `${fmtDay(s)} ${fmtClock(s)}`;
 const initials = (name: string) =>
   name
     .replace(/[^\p{L}\s]/gu, "")
@@ -77,6 +54,7 @@ const describe = (m: Match) => `${m.teamName1} vs ${m.teamName2} · ${fmtDay(m.k
 
 async function notify(title: string, body: string) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  // Same tag as server Web Push, so a push + local notification for one event collapse into one.
   const options: NotificationOptions = { body, icon: "/icon.svg", badge: "/icon.svg", tag: "tazkarti-watch", data: { url: "/" } };
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
@@ -85,18 +63,44 @@ async function notify(title: string, body: string) {
   new Notification(title, options);
 }
 
+const b64ToBytes = (b64: string) => {
+  const raw = atob((b64 + "=".repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+};
+
+/** Subscribe this browser to server Web Push, so alerts arrive even with the tab closed. */
+async function subscribePush(): Promise<boolean> {
+  try {
+    if (!("PushManager" in window) || Notification.permission !== "granted") return false;
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      const { publicKey } = (await fetch("/api/push").then((r) => r.json())) as { publicKey: string };
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(publicKey) });
+    }
+    const res = await fetch("/api/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "web", subscription: sub }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export default function Home() {
   const [matches, setMatches] = useState<Match[]>([]);
   const [freshIds, setFreshIds] = useState<Set<number>>(new Set());
-  const [lastChecked, setLastChecked] = useState<Date | null>(null);
   const [lastModified, setLastModified] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [interval, setIntervalSec] = useState(30);
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
-  const [log, setLog] = useState<LogEntry[]>([]);
+  const [pushOn, setPushOn] = useState(false);
+  const [status, setStatus] = useState<WatcherStatus | null>(null);
+  const [streamUp, setStreamUp] = useState(false);
+  const [events, setEvents] = useState<WatchEvent[]>([]);
   const [countdown, setCountdown] = useState(0);
-  const nextAt = useRef(0);
   const [armed, setArmed] = useState(false);
   const [alarm, setAlarm] = useState<{ title: string; lines: string[] } | null>(null);
 
@@ -110,83 +114,87 @@ export default function Home() {
     setAlarm(null);
   };
 
-  const addLog = useCallback((text: string, kind: LogEntry["kind"]) => {
-    setLog((l) => [{ at: fmtClock(new Date()), text, kind }, ...l].slice(0, 30));
-  }, []);
+  // Pull the server's current list and diff it against what *this browser* has already seen,
+  // so you still get the alarm for matches that dropped while the page was closed.
+  const sync = useCallback(
+    async (fresh = false) => {
+      if (fresh) setChecking(true);
+      try {
+        const res = await fetch(`/api/matches${fresh ? "?fresh=1" : ""}`, { cache: "no-store" });
+        const data = (await res.json()) as MatchesResponse;
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        setError(data.error ?? null);
 
-  const check = useCallback(async () => {
-    setChecking(true);
-    try {
-      const res = await fetch("/api/matches", { cache: "no-store" });
-      const data = (await res.json()) as ApiResponse;
-      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-
-      const known = store.get<number[] | null>(KNOWN_IDS, null);
-      const prevHash = store.get<string | null>(LAST_HASH, null);
-      const ids = data.matches.map((m) => m.matchId);
-
-      if (known === null) {
-        addLog(`Watching started — ${ids.length} match${ids.length === 1 ? "" : "es"} on Tazkarti right now.`, "info");
-      } else {
-        const knownSet = new Set(known);
-        const added = data.matches.filter((m) => !knownSet.has(m.matchId));
-        if (added.length) {
-          const title = added.length === 1 ? "New match uploaded on Tazkarti" : `${added.length} new matches uploaded on Tazkarti`;
-          const body = added.slice(0, 3).map(describe).join("\n") + (added.length > 3 ? `\n+${added.length - 3} more` : "");
-          notify(title, body);
-          ring(title, added.map(describe));
-          setFreshIds((s) => new Set([...s, ...added.map((m) => m.matchId)]));
-          added.forEach((m) => addLog(`New: ${describe(m)}`, "new"));
-        } else if (prevHash && prevHash !== data.hash) {
-          notify("Tazkarti matches updated", "The matches list changed (details, times or removals).");
-          addLog("Matches list changed — no new matches, but details were updated.", "update");
+        const known = store.get<number[] | null>(KNOWN_IDS, null);
+        if (known !== null) {
+          const knownSet = new Set(known);
+          const added = data.matches.filter((m) => !knownSet.has(m.matchId));
+          if (added.length) {
+            const title =
+              added.length === 1 ? "New match uploaded on Tazkarti" : `${added.length} new matches uploaded on Tazkarti`;
+            notify(title, added.slice(0, 3).map(describe).join("\n"));
+            ring(title, added.map(describe));
+            setFreshIds((s) => new Set([...s, ...added.map((m) => m.matchId)]));
+          }
         }
+        store.set(KNOWN_IDS, Array.from(new Set([...(known ?? []), ...data.matches.map((m) => m.matchId)])));
+        setMatches(data.matches);
+        setLastModified(data.lastModified);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        if (fresh) setChecking(false);
       }
-
-      store.set(KNOWN_IDS, Array.from(new Set([...(known ?? []), ...ids])));
-      store.set(LAST_HASH, data.hash);
-      setMatches(data.matches);
-      setLastModified(data.lastModified);
-      setError(null);
-    } catch (e) {
-      const msg = (e as Error).message;
-      setError(msg);
-      addLog(`Check failed: ${msg}`, "error");
-    } finally {
-      setLastChecked(new Date());
-      setChecking(false);
-    }
-  }, [addLog, ring]);
+    },
+    [ring],
+  );
 
   // Initial setup
   useEffect(() => {
-    setIntervalSec(store.get(INTERVAL, 30));
-    setPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
-    navigator.serviceWorker?.register("/sw.js").catch(() => {});
-  }, []);
+    const perm = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+    setPermission(perm);
+    navigator.serviceWorker
+      ?.register("/sw.js")
+      .then(() => (perm === "granted" ? subscribePush().then(setPushOn) : undefined))
+      .catch(() => {});
+    fetch("/api/events?limit=30")
+      .then((r) => r.json())
+      .then((d: { events: WatchEvent[] }) => setEvents(d.events))
+      .catch(() => {});
+    sync();
+  }, [sync]);
 
-  // Polling loop
+  // Live link to the server watcher. The server checks Tazkarti on its own schedule;
+  // we just react to its `change` events (plus a slow fallback refresh in case the stream drops).
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout>;
-    let alive = true;
-    const run = async () => {
-      await check();
-      if (!alive) return;
-      nextAt.current = Date.now() + interval * 1000;
-      timer = setTimeout(run, interval * 1000);
-    };
-    run();
+    const es = new EventSource("/api/stream");
+    es.onopen = () => setStreamUp(true);
+    es.onerror = () => setStreamUp(false);
+    es.addEventListener("status", (e) => {
+      const s = JSON.parse((e as MessageEvent).data) as WatcherStatus;
+      setStatus(s);
+      setError(s.lastError);
+    });
+    es.addEventListener("change", (e) => {
+      const ev = JSON.parse((e as MessageEvent).data) as WatchEvent;
+      setEvents((list) => [ev, ...list.filter((x) => x.id !== ev.id)].slice(0, 30));
+      sync();
+    });
+    const fallback = setInterval(() => sync(), 60_000);
     return () => {
-      alive = false;
-      clearTimeout(timer);
+      es.close();
+      clearInterval(fallback);
     };
-  }, [interval, check]);
+  }, [sync]);
 
-  // Countdown ticker
+  // Countdown to the server's next check
   useEffect(() => {
-    const t = setInterval(() => setCountdown(Math.max(0, Math.ceil((nextAt.current - Date.now()) / 1000))), 500);
+    const t = setInterval(() => {
+      const next = status?.nextCheckAt ? Date.parse(status.nextCheckAt) : 0;
+      setCountdown(Math.max(0, Math.ceil((next - Date.now()) / 1000)));
+    }, 500);
     return () => clearInterval(t);
-  }, []);
+  }, [status]);
 
   // Audio can only start after a user gesture, so arm it on the first click/key anywhere on the page.
   useEffect(() => {
@@ -245,12 +253,10 @@ export default function Home() {
     if (typeof Notification === "undefined") return;
     const p = await Notification.requestPermission();
     setPermission(p);
-    if (p === "granted") notify("Notifications are on", "You'll be alerted the moment new matches go up on Tazkarti.");
-  };
-
-  const changeInterval = (s: number) => {
-    setIntervalSec(s);
-    store.set(INTERVAL, s);
+    if (p !== "granted") return;
+    const ok = await subscribePush();
+    setPushOn(ok);
+    notify("Notifications are on", ok ? "You'll get alerts even with this tab closed." : "You'll be alerted while this tab is open.");
   };
 
   const sorted = [...matches].sort((a, b) => +new Date(a.kickOffTime) - +new Date(b.kickOffTime));
@@ -289,9 +295,9 @@ export default function Home() {
             </span>
             <span className="brand-tag">Watch</span>
           </div>
-          <div className={`live ${error ? "down" : ""}`}>
+          <div className={`live ${error || !streamUp ? "down" : ""}`}>
             <i />
-            {error ? "Connection issue" : checking ? "Checking…" : "Live"}
+            {!streamUp ? "Reconnecting…" : error ? "Tazkarti unreachable" : checking ? "Checking…" : "Live"}
           </div>
         </div>
       </header>
@@ -310,11 +316,11 @@ export default function Home() {
             </div>
             <div className="stat">
               <span className="label">Next check</span>
-              <strong>{checking ? "…" : `${countdown}s`}</strong>
+              <strong>{checking || !status ? "…" : `${countdown}s`}</strong>
             </div>
             <div className="stat">
               <span className="label">Last checked</span>
-              <strong className="sm">{lastChecked ? fmtClock(lastChecked) : "—"}</strong>
+              <strong className="sm">{status?.lastChecked ? fmtClock(status.lastChecked) : "—"}</strong>
             </div>
             <div className="stat">
               <span className="label">Source updated</span>
@@ -326,7 +332,11 @@ export default function Home() {
             {permission === "granted" ? (
               <div className="notif on">
                 <b>Notifications on</b>
-                <span>Keep this tab open — you&apos;ll be alerted when matches drop.</span>
+                <span>
+                  {pushOn
+                    ? "Push is set up — you'll get alerts even with this tab closed."
+                    : "You'll be alerted while this tab is open."}
+                </span>
               </div>
             ) : permission === "denied" ? (
               <div className="notif off">
@@ -344,20 +354,15 @@ export default function Home() {
               </button>
             )}
 
-            <div className="row">
-              <label htmlFor="iv">Check every</label>
-              <div className="seg" id="iv" role="radiogroup">
-                {INTERVALS.map((s) => (
-                  <button
-                    key={s}
-                    role="radio"
-                    aria-checked={interval === s}
-                    className={interval === s ? "active" : ""}
-                    onClick={() => changeInterval(s)}
-                  >
-                    {s < 60 ? `${s}s` : `${s / 60}m`}
-                  </button>
-                ))}
+            <div className="server">
+              <span className={`dot ${status?.running ? "ok" : ""}`} />
+              <div>
+                <b>Server watcher {status?.running ? "running 24/7" : "starting…"}</b>
+                <span>
+                  {status
+                    ? `Checks Tazkarti every ${status.intervalSeconds}s · up since ${fmtStamp(status.startedAt)}`
+                    : "Connecting…"}
+                </span>
               </div>
             </div>
 
@@ -371,7 +376,7 @@ export default function Home() {
             </div>
 
             <div className="row buttons">
-              <button className="btn" onClick={check} disabled={checking}>
+              <button className="btn" onClick={() => sync(true)} disabled={checking}>
                 Check now
               </button>
               <button
@@ -394,7 +399,12 @@ export default function Home() {
           </div>
         </section>
 
-        {error && <div className="glass banner">Couldn&apos;t reach Tazkarti: {error}. Retrying automatically.</div>}
+        {error && (
+          <div className="glass banner">
+            Couldn&apos;t reach Tazkarti: {error}. The server keeps retrying
+            {matches.length ? " — showing the last list it got." : "."}
+          </div>
+        )}
 
         <section>
           <div className="section-head">
@@ -485,14 +495,14 @@ export default function Home() {
 
         <section className="glass tile activity">
           <h2>Activity</h2>
-          {log.length === 0 ? (
-            <p className="muted">Nothing yet.</p>
+          {events.length === 0 ? (
+            <p className="muted">No changes on Tazkarti since the server started watching.</p>
           ) : (
             <ul>
-              {log.map((e, i) => (
-                <li key={i} className={e.kind}>
-                  <time>{e.at}</time>
-                  <span>{e.text}</span>
+              {events.map((e) => (
+                <li key={e.id} className={e.type === "new-matches" ? "new" : "update"}>
+                  <time>{fmtStamp(e.at)}</time>
+                  <span>{e.message}</span>
                 </li>
               ))}
             </ul>

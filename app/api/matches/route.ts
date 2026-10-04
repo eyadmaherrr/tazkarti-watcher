@@ -1,28 +1,10 @@
-import { createHash } from "node:crypto";
+import { checkNow, getMatches, startWatcher } from "@/lib/watcher";
 
-const SOURCE = "https://tazkarti.com/data/matches-list-json.json";
-
-export async function GET() {
-  try {
-    const res = await fetch(SOURCE, {
-      cache: "no-store",
-      headers: { "User-Agent": "Mozilla/5.0 (TazkartiWatcher)", Accept: "application/json" },
-    });
-    if (!res.ok) {
-      return Response.json({ error: `Upstream responded ${res.status}` }, { status: 502 });
-    }
-    const body = await res.text();
-    const matches = JSON.parse(body);
-    return Response.json(
-      {
-        matches,
-        hash: createHash("sha1").update(body).digest("hex"),
-        lastModified: res.headers.get("last-modified"),
-        fetchedAt: new Date().toISOString(),
-      },
-      { headers: { "Cache-Control": "no-store" } },
-    );
-  } catch (err) {
-    return Response.json({ error: (err as Error).message }, { status: 502 });
-  }
+// Current matches as last seen by the server watcher (cheap — doesn't hit Tazkarti).
+// ?fresh=1 forces a check against Tazkarti first.
+export async function GET(req: Request) {
+  const w = startWatcher();
+  const fresh = new URL(req.url).searchParams.get("fresh") === "1";
+  if (fresh || !w.state.lastSuccess) await checkNow();
+  return Response.json(getMatches(), { headers: { "Cache-Control": "no-store" } });
 }

@@ -214,3 +214,12 @@ h2 { font-size: 24px; font-weight: 800; }
   .alarm { animation: none; background: rgba(220, 0, 0, 0.92); }
   .alarm-box, .alarm-icon { animation: none; }
 }
+
+/* ---------- server watcher status ---------- */
+.server { display: flex; gap: 12px; align-items: flex-start; padding: 11px 14px; border-radius: 12px; background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.14); font-size: 13px; }
+.server b { display: block; font-size: 14px; }
+.server span:not(.dot) { color: var(--ink-2); }
+.server .dot { width: 10px; height: 10px; margin-top: 6px; flex: none; border-radius: 50%; background: var(--ink-3); }
+.server .dot.ok { background: var(--green-hi); animation: ping 1.8s infinite; }
+.activity li { grid-template-columns: 132px 1fr; }
