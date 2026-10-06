@@ -6,11 +6,13 @@ export async function GET(req: Request) {
   const enc = new TextEncoder();
   let cleanup = () => {};
 
+  const initial = await getStatus();
+
   const stream = new ReadableStream({
     start(controller) {
       const send = (event: string, data: unknown) =>
         controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-      send("status", getStatus());
+      send("status", initial);
       const offChange = onWatcher("change", (e) => send("change", e));
       const offChecked = onWatcher("checked", (s) => send("status", s));
       const ping = setInterval(() => controller.enqueue(enc.encode(": ping\n\n")), 25_000);

@@ -5,15 +5,15 @@ type Body = { type: "web"; subscription: PushSubscription } | { type: "expo"; to
 
 // GET → VAPID public key for browser Web Push.
 export async function GET() {
-  return Response.json({ publicKey: getVapid().publicKey });
+  return Response.json({ publicKey: (await getVapid()).publicKey });
 }
 
 // POST { type: "web", subscription } | { type: "expo", token } → register a device.
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Body;
-    if (body.type === "web") addWeb(body.subscription);
-    else if (body.type === "expo") addExpo(body.token);
+    if (body.type === "web") await addWeb(body.subscription);
+    else if (body.type === "expo") await addExpo(body.token);
     else throw new Error('type must be "web" or "expo"');
     return Response.json({ ok: true });
   } catch (e) {
@@ -25,8 +25,8 @@ export async function POST(req: Request) {
 export async function DELETE(req: Request) {
   try {
     const body = (await req.json()) as Body;
-    if (body.type === "web") removeWeb(body.subscription?.endpoint);
-    else if (body.type === "expo") removeExpo(body.token);
+    if (body.type === "web") await removeWeb(body.subscription?.endpoint);
+    else if (body.type === "expo") await removeExpo(body.token);
     else throw new Error('type must be "web" or "expo"');
     return Response.json({ ok: true });
   } catch (e) {

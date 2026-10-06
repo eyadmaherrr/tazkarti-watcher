@@ -1,0 +1,33 @@
+# Keeps the Vercel deployment "always on": Vercel can't run a background loop, so this calls
+# /api/check once a minute (each run starts every 5 minutes and checks 5 times, ~1 min apart).
+# Free for public repos. GitHub may delay scheduled runs at busy times — for a strict 1-minute
+# schedule, also point a free cron service at /api/check (see README).
+name: Keep checking Tazkarti
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-checking
+  cancel-in-progress: false
+
+jobs:
+  check:
+    # Only the repo Vercel deploys from should ping it (this file is shared with tazkarti-watcher).
+    if: github.repository == 'eyadmaherrr/watch-tazkarti'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check every minute for 5 minutes
+        env:
+          WATCH_URL: ${{ vars.WATCH_URL || 'https://watch-tazkarti.vercel.app' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -m 50 -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer ${CRON_SECRET}" "$WATCH_URL/api/check" || echo "000")
+            echo "check $i: HTTP $code"
+            if [ "$i" -lt 5 ]; then sleep 55; fi
+          done

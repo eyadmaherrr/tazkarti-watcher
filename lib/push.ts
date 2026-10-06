@@ -1,66 +1,83 @@
 import webpush, { type PushSubscription } from "web-push";
-import { readJson, writeJson } from "./store";
+import { load, save, usingRedis } from "./store";
 
 type Subscribers = { web: PushSubscription[]; expo: string[] };
 type Vapid = { publicKey: string; privateKey: string };
 
 export type PushPayload = { title: string; body: string; url?: string; data?: Record<string, unknown> };
 
-const SUBS_FILE = "subscribers.json";
+const SUBS_KEY = "subscribers";
 const EXPO_TOKEN = /^(Exponent|Expo)PushToken\[.+\]$/;
 
-let subs: Subscribers | null = null;
+let cache: Subscribers | null = null;
 let vapid: Vapid | null = null;
 
-const load = () => (subs ??= readJson<Subscribers>(SUBS_FILE, { web: [], expo: [] }));
-const save = () => writeJson(SUBS_FILE, load());
+// With Redis another instance may have changed the list, so always re-read; with files, memory is canonical.
+async function subscribers(): Promise<Subscribers> {
+  if (usingRedis || !cache) cache = { web: [], expo: [], ...(await load<Partial<Subscribers>>(SUBS_KEY, {})) };
+  return cache;
+}
 
-/** VAPID keys from env, or generated once and kept in DATA_DIR so existing subscriptions stay valid. */
-export function getVapid(): Vapid {
-  if (vapid) return vapid;
-  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-    vapid = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
-  } else {
-    vapid = readJson<Vapid | null>("vapid.json", null) ?? webpush.generateVAPIDKeys();
-    writeJson("vapid.json", vapid);
+async function update(fn: (s: Subscribers) => void) {
+  const s = await subscribers();
+  fn(s);
+  await save(SUBS_KEY, s);
+}
+
+/** VAPID keys from env, or generated once and stored so existing browser subscriptions stay valid. */
+export async function getVapid(): Promise<Vapid> {
+  if (!vapid) {
+    if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+      vapid = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
+    } else {
+      vapid = await load<Vapid | null>("vapid", null);
+      if (!vapid) {
+        vapid = webpush.generateVAPIDKeys();
+        await save("vapid", vapid);
+      }
+    }
+    webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:admin@example.com", vapid.publicKey, vapid.privateKey);
   }
-  webpush.setVapidDetails(process.env.VAPID_SUBJECT || "mailto:admin@example.com", vapid.publicKey, vapid.privateKey);
   return vapid;
 }
 
-export const subscriberCounts = () => ({ web: load().web.length, expo: load().expo.length });
+export async function subscriberCounts() {
+  const s = await subscribers();
+  return { web: s.web.length, expo: s.expo.length };
+}
 
-export function addWeb(sub: PushSubscription) {
+export async function addWeb(sub: PushSubscription) {
   if (!sub?.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) throw new Error("Invalid web push subscription");
-  const s = load();
-  s.web = [...s.web.filter((x) => x.endpoint !== sub.endpoint), sub];
-  save();
+  await update((s) => {
+    s.web = [...s.web.filter((x) => x.endpoint !== sub.endpoint), sub];
+  });
 }
 
-export function removeWeb(endpoint: string) {
-  const s = load();
-  s.web = s.web.filter((x) => x.endpoint !== endpoint);
-  save();
+export async function removeWeb(endpoint: string) {
+  await update((s) => {
+    s.web = s.web.filter((x) => x.endpoint !== endpoint);
+  });
 }
 
-export function addExpo(token: string) {
+export async function addExpo(token: string) {
   if (!EXPO_TOKEN.test(token)) throw new Error("Invalid Expo push token");
-  const s = load();
-  if (!s.expo.includes(token)) s.expo.push(token);
-  save();
+  await update((s) => {
+    if (!s.expo.includes(token)) s.expo.push(token);
+  });
 }
 
-export function removeExpo(token: string) {
-  const s = load();
-  s.expo = s.expo.filter((t) => t !== token);
-  save();
+export async function removeExpo(token: string) {
+  await update((s) => {
+    s.expo = s.expo.filter((t) => t !== token);
+  });
 }
 
-async function sendWeb(payload: PushPayload) {
-  getVapid();
+async function sendWeb(targets: PushSubscription[], payload: PushPayload) {
+  if (!targets.length) return;
+  await getVapid();
   const dead: string[] = [];
   await Promise.all(
-    load().web.map((sub) =>
+    targets.map((sub) =>
       webpush.sendNotification(sub, JSON.stringify(payload), { TTL: 60 * 60, urgency: "high" }).catch((err) => {
         // 404/410 = the browser dropped this subscription; forget it.
         if (err?.statusCode === 404 || err?.statusCode === 410) dead.push(sub.endpoint);
@@ -68,11 +85,13 @@ async function sendWeb(payload: PushPayload) {
       }),
     ),
   );
-  dead.forEach(removeWeb);
+  if (dead.length) await update((s) => (s.web = s.web.filter((x) => !dead.includes(x.endpoint))));
 }
 
-async function sendExpo(payload: PushPayload) {
-  const tokens = load().expo;
+async function sendExpo(tokens: string[], payload: PushPayload) {
+  // New matches (and their reminders) use the app's alarm channel + siren; other changes the quieter one.
+  const alarm = payload.data?.type !== "updated";
+  const dead: string[] = [];
   for (let i = 0; i < tokens.length; i += 100) {
     const batch = tokens.slice(i, i + 100);
     try {
@@ -86,23 +105,33 @@ async function sendExpo(payload: PushPayload) {
             body: payload.body,
             data: payload.data,
             // alarm.wav ships with the Tazkarti Watch app (expo-notifications "sounds"); falls back to default.
-            sound: "alarm.wav",
-            interruptionLevel: "time-sensitive",
+            sound: alarm ? "alarm.wav" : "default",
+            interruptionLevel: alarm ? "time-sensitive" : "active",
             priority: "high",
-            channelId: "new-matches",
+            channelId: alarm ? "new-matches" : "matches-updated",
           })),
         ),
       });
       const json = (await res.json()) as { data?: { status: string; details?: { error?: string } }[] };
       json.data?.forEach((ticket, j) => {
-        if (ticket.details?.error === "DeviceNotRegistered") removeExpo(batch[j]);
+        if (ticket.details?.error === "DeviceNotRegistered") dead.push(batch[j]);
       });
     } catch (err) {
       console.error("[push] expo push failed:", (err as Error).message);
     }
   }
+  if (dead.length) await update((s) => (s.expo = s.expo.filter((t) => !dead.includes(t))));
 }
 
-export async function broadcast(payload: PushPayload) {
-  await Promise.all([sendWeb(payload), sendExpo(payload)]);
+/**
+ * Send to every subscribed browser and phone, except `exclude` (Web Push endpoints / Expo tokens).
+ * Returns how many devices it was sent to.
+ */
+export async function broadcast(payload: PushPayload, opts: { exclude?: Set<string> } = {}): Promise<number> {
+  const s = await subscribers();
+  const skip = opts.exclude ?? new Set<string>();
+  const web = s.web.filter((x) => !skip.has(x.endpoint));
+  const expo = s.expo.filter((t) => !skip.has(t));
+  await Promise.all([sendWeb(web, payload), sendExpo(expo, payload)]);
+  return web.length + expo.length;
 }

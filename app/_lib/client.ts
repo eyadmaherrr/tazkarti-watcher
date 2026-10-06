@@ -113,3 +113,17 @@ export async function subscribePush(): Promise<boolean> {
     return false;
   }
 }
+
+/** Tell the server this browser stopped the alarm, so it stops re-sending the pending alerts here. */
+export async function ackAlarm() {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    if (!sub) return;
+    await fetch("/api/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "web", endpoint: sub.endpoint }),
+    });
+  } catch {}
+}

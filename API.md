@@ -38,7 +38,9 @@ Current matches list as the server last saw it. Served from memory, so polling i
   "lastError": null,
   "sourceLastModified": "…",
   "matchCount": 1,
-  "subscribers": { "web": 0, "expo": 2 }
+  "subscribers": { "web": 0, "expo": 2 },
+  "pendingAlerts": 0,
+  "storage": "redis"
 }
 ```
 
@@ -112,6 +114,21 @@ Unregister by sending a `DELETE` request with the same body. The server sends to
 - `POST /api/push` with `{ "type": "web", "subscription": <PushSubscription JSON> }` registers the browser.
 
 The website does both of these automatically when you press **Enable notifications**.
+
+## `POST /api/ack`
+
+The device pressed STOP (or tapped the notification), so stop re-sending it reminders for pending new-match alerts.
+
+```http
+POST /api/ack
+Content-Type: application/json
+
+{ "type": "expo", "token": "ExponentPushToken[xxxxxxxx]" }
+```
+
+Browsers send `{ "type": "web", "endpoint": "<PushSubscription.endpoint>" }` instead. The response is `{ "ok": true, "acknowledged": <number of pending alerts silenced> }`.
+
+**Reminders.** After a new-match push, the server re-sends it every `REMIND_EVERY_SECONDS` (default 60) to each device that hasn't acknowledged, up to `REMIND_MAX` times (default 30). Reminder pushes carry `data.type = "reminder"`. `/api/status` reports `pendingAlerts`.
 
 ## `POST /api/check` (also `GET`)
 

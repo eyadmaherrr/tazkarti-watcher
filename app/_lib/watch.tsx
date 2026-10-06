@@ -3,7 +3,7 @@
 import { createContext, use, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Match, MatchesResponse, Team, WatchEvent, WatcherStatus } from "@/lib/types";
 import { armAudio, isAudioArmed, startAlarm, stopAlarm } from "../alarm";
-import { describe, getJson, Keys, notify, playsIn, store, subscribePush } from "./client";
+import { ackAlarm, describe, getJson, Keys, notify, playsIn, store, subscribePush } from "./client";
 
 // The website's state, mirroring the Expo app's src/lib/watch.tsx.
 
@@ -92,6 +92,7 @@ export function WatchProvider({ children }: { children: ReactNode }) {
   const silence = useCallback(() => {
     stopAlarm();
     setAlarm(null);
+    void ackAlarm(); // stop the server's reminder pushes to this browser
   }, []);
 
   // Pull the server's list and diff it against what *this browser* has already seen, so matches that

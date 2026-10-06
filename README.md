@@ -40,7 +40,19 @@ Keep `DATA_DIR` (the `/data` volume above) on persistent storage. It holds:
 - push subscribers;
 - the auto-generated VAPID keys. If these are lost, every browser has to re-subscribe.
 
-On serverless hosts (e.g. Vercel), the background loop can't stay alive. Set `WATCHER_DISABLED=1` and `CRON_SECRET`, then call `POST /api/check` from a cron job instead.
+### On Vercel
+
+Vercel can't keep a background loop running, so two extra pieces keep it "always on":
+
+1. **A database.** In the Vercel dashboard go to **Storage → Create → Upstash (Redis)**, connect it to this project, and redeploy. This sets `KV_REST_API_URL` / `KV_REST_API_TOKEN`, and the server switches from files to Redis automatically. `/api/status` shows `"storage": "redis"`.
+2. **Something calling `/api/check` every minute.**
+   - `.github/workflows/keep-checking.yml` does this from GitHub Actions. It's free for public repos, but GitHub can delay scheduled runs.
+   - For a strict 1-minute schedule, also create a free job at [cron-job.org](https://cron-job.org): `POST https://watch-tazkarti.vercel.app/api/check`, every minute.
+   - If you set `CRON_SECRET`, send it as `Authorization: Bearer <secret>`. Add the same value as a GitHub Actions secret named `CRON_SECRET`.
+
+### Reminders until STOP
+
+New-match alerts are re-sent to each phone or browser every `REMIND_EVERY_SECONDS` (default 60), up to `REMIND_MAX` times (default 30), until that device presses STOP or taps the notification. Either one calls `POST /api/ack`.
 
 ## How it works
 
@@ -49,8 +61,8 @@ On serverless hosts (e.g. Vercel), the background loop can't stay alive. Set `WA
 | `instrumentation.ts` | Starts the watcher once when the server boots. |
 | `lib/watcher.ts` | Polling loop, change detection (new match IDs vs. other edits), event history, live event emitter. |
 | `lib/push.ts` | Web Push (VAPID) and Expo push delivery; drops dead subscriptions. |
-| `lib/store.ts` | JSON-file persistence in `DATA_DIR`. |
-| `app/api/*` | Public API: `matches`, `status`, `events`, `stream` (SSE), `push`, `check`. |
+| `lib/store.ts` | Persistence: Redis when configured (serverless), otherwise JSON files in `DATA_DIR`; cross-instance lock. |
+| `app/api/*` | Public API: `matches`, `status`, `events`, `stream` (SSE), `push`, `ack`, `check`, `teams`. |
 | `app/page.tsx` | Website shell: header, tabs (Matches / Activity / Settings), first-visit onboarding. |
 | `app/_lib/watch.tsx` | Website state: follows the server, rings the alarm for matches this browser hasn't seen, notifies on every change, favourite team, settings. |
 | `app/_components/*` | Screens and pieces shared with the app's design: match cards, team picker, favourite-team card, alarm overlay. |

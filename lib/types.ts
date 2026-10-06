@@ -53,6 +53,21 @@ export type WatcherStatus = {
   sourceLastModified: string | null;
   matchCount: number;
   subscribers: { web: number; expo: number };
+  /** New-match alerts still being re-sent to devices that haven't pressed STOP */
+  pendingAlerts: number;
+  storage: "redis" | "file";
+};
+
+/** A new-match alert that keeps being re-sent until each device acknowledges it (POST /api/ack). */
+export type PendingAlert = {
+  eventId: string;
+  title: string;
+  body: string;
+  firstAt: string;
+  lastSentAt: string;
+  sends: number;
+  /** Expo push tokens / Web Push endpoints that pressed STOP */
+  acked: string[];
 };
 
 export type MatchesResponse = {
