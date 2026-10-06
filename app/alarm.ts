@@ -1,17 +1,22 @@
 // Wake-you-up alarm built entirely from Web Audio oscillators.
 // Every modulation runs on the audio thread (LFOs, not JS timers), so it keeps
 // blaring at full speed even when the tab is in the background.
+// It loops until stopAlarm(): a watchdog restarts it if the browser suspends audio,
+// and if it was requested before sound was unlocked it starts the moment you click the page.
 
 let ctx: AudioContext | null = null;
 let nodes: AudioNode[] = [];
 let sources: (OscillatorNode | AudioBufferSourceNode)[] = [];
 let vibrateTimer: ReturnType<typeof setInterval> | null = null;
+let watchdog: ReturnType<typeof setInterval> | null = null;
+let wanted = false; // true from startAlarm() until stopAlarm()
 
 /** Must be called from a click/keypress at least once — browsers block audio until then. */
 export async function armAudio(): Promise<boolean> {
   try {
     ctx ??= new AudioContext();
     if (ctx.state !== "running") await ctx.resume();
+    if (wanted) play(); // an alarm was already waiting for sound to be allowed
     return ctx.state === "running";
   } catch {
     return false;
@@ -43,8 +48,24 @@ function modulate(c: AudioContext, param: AudioParam, type: OscillatorType, rate
   lfo.connect(amt).connect(param);
 }
 
+/** Ring until stopAlarm(). Safe to call repeatedly. */
 export function startAlarm() {
-  if (!ctx || isRinging()) return;
+  wanted = true;
+  play();
+  if ("vibrate" in navigator && !vibrateTimer) {
+    navigator.vibrate([600, 200, 600, 200, 600]);
+    vibrateTimer = setInterval(() => navigator.vibrate([600, 200, 600, 200, 600]), 2600);
+  }
+  // Keep it going no matter what: resume suspended audio, rebuild the siren if it was torn down.
+  watchdog ??= setInterval(() => {
+    if (!wanted || !ctx) return;
+    if (ctx.state !== "running") ctx.resume().then(play, () => {});
+    else play();
+  }, 1000);
+}
+
+function play() {
+  if (!ctx || ctx.state !== "running" || isRinging()) return;
   const c = ctx;
 
   // Hard limiter-ish chain so the stacked layers are as loud as possible without clipping to mush.
@@ -83,14 +104,12 @@ export function startAlarm() {
 
   const t = c.currentTime;
   sources.forEach((s) => s.start(t));
-
-  if ("vibrate" in navigator) {
-    navigator.vibrate([600, 200, 600, 200, 600]);
-    vibrateTimer = setInterval(() => navigator.vibrate([600, 200, 600, 200, 600]), 2600);
-  }
 }
 
 export function stopAlarm() {
+  wanted = false;
+  if (watchdog) clearInterval(watchdog);
+  watchdog = null;
   sources.forEach((s) => {
     try {
       s.stop();

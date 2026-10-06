@@ -1,7 +1,19 @@
 // Shape of one entry in https://tazkarti.com/data/matches-list-json.json (fields we use; the rest pass through).
+export type Team = {
+  id: number;
+  name: string;
+  nameAr: string | null;
+  shortName: string | null;
+  /** Logo GUID without extension (Tazkarti serves .png for most, .jpeg for some) */
+  icon: string | null;
+  gameId: number | null;
+};
+
 export type Match = {
   matchId: number;
   matchStatus: number;
+  teamId1: number;
+  teamId2: number;
   teamName1: string;
   teamName2: string;
   teamNameAr1?: string;

@@ -51,5 +51,7 @@ On serverless hosts (e.g. Vercel), the background loop can't stay alive. Set `WA
 | `lib/push.ts` | Web Push (VAPID) and Expo push delivery; drops dead subscriptions. |
 | `lib/store.ts` | JSON-file persistence in `DATA_DIR`. |
 | `app/api/*` | Public API: `matches`, `status`, `events`, `stream` (SSE), `push`, `check`. |
-| `app/page.tsx` | Website. Follows the server over SSE and rings the alarm for matches this browser hasn't seen yet. |
-| `app/alarm.ts` | Web Audio siren that keeps playing in background tabs. |
+| `app/page.tsx` | Website shell: header, tabs (Matches / Activity / Settings), first-visit onboarding. |
+| `app/_lib/watch.tsx` | Website state: follows the server, rings the alarm for matches this browser hasn't seen, notifies on every change, favourite team, settings. |
+| `app/_components/*` | Screens and pieces shared with the app's design: match cards, team picker, favourite-team card, alarm overlay. |
+| `app/alarm.ts` | Web Audio siren that loops until STOP (a watchdog restarts it if the browser suspends audio). |

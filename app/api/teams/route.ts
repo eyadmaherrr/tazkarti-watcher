@@ -1,3 +1,5 @@
+import type { Team } from "@/lib/types";
+
 // All teams Tazkarti knows about (for "pick your favourite team" in the app), trimmed from ~300 KB to
 // the fields a client needs and cached in memory — the list changes rarely.
 const SOURCE = "https://tazkarti.com/booksprt/teams/getTeams?hasActiveMatches=false";
@@ -13,8 +15,6 @@ type RawTeam = {
   isDeleted?: boolean;
   teamStatus?: number;
 };
-
-export type Team = { id: number; name: string; nameAr: string | null; shortName: string | null; icon: string | null; gameId: number | null };
 
 let cache: { at: number; teams: Team[] } | null = null;
 
